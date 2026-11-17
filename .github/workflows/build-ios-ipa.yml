@@ -1,0 +1,88 @@
+name: Build CardboardXR iOS IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export-xcode-project:
+    name: Export iOS Xcode project with Unity
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Cache Unity Library
+        uses: actions/cache@v4
+        with:
+          path: Library
+          key: Library-iOS-${{ hashFiles('Assets/**', 'Packages/**', 'ProjectSettings/**') }}
+          restore-keys: |
+            Library-iOS-
+
+      - name: Export iOS project
+        uses: game-ci/unity-builder@v4
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+        with:
+          unityVersion: auto
+          targetPlatform: iOS
+          buildMethod: ProjectBootstrap.StereoBuilder.BuildIos
+          allowDirtyBuild: true
+
+      - name: Verify Xcode project exists
+        run: test -d Builds/iOS/Unity-iPhone.xcodeproj
+
+      - name: Upload Xcode project
+        uses: actions/upload-artifact@v4
+        with:
+          name: CardboardXR-iOS-Xcode
+          path: Builds/iOS/
+          if-no-files-found: error
+          retention-days: 7
+
+  package-ipa:
+    name: Compile and package unsigned IPA
+    runs-on: macos-latest
+    needs: export-xcode-project
+    steps:
+      - name: Download Xcode project
+        uses: actions/download-artifact@v4
+        with:
+          name: CardboardXR-iOS-Xcode
+          path: Builds/iOS
+
+      - name: Build iOS app without code signing
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project Builds/iOS/Unity-iPhone.xcodeproj \
+            -scheme Unity-iPhone \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/CardboardXRDerived" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package IPA
+        run: |
+          set -euo pipefail
+          APP="$(find "$RUNNER_TEMP/CardboardXRDerived/Build/Products/Release-iphoneos" -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$APP"
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          ditto "$APP" "$RUNNER_TEMP/ipa/Payload/$(basename "$APP")"
+          (cd "$RUNNER_TEMP/ipa" && /usr/bin/zip -qry "$GITHUB_WORKSPACE/CardboardXR-unsigned.ipa" Payload)
+          test -s "$GITHUB_WORKSPACE/CardboardXR-unsigned.ipa"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: CardboardXR-unsigned-IPA
+          path: CardboardXR-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
